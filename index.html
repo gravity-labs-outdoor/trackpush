@@ -43,12 +43,6 @@
     z-index: 1;
   }
 
-  /* Scale up slightly when rotating to cover corner gaps */
-  #map.heading-up {
-    transform-origin: center center;
-    transition: transform 0.3s ease;
-  }
-
   .leaflet-control-zoom { display: none; }
   .leaflet-control-attribution { font-size: 9px !important; opacity: 0.5; }
 
@@ -602,16 +596,6 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-  }
-
-  .hud-status .gps-btn + .gps-btn {
-    margin-left: 0;
-  }
-
-  .hud-buttons {
-    display: flex;
-    gap: 6px;
   }
 
   .status-indicator {
@@ -924,10 +908,7 @@
         <div class="status-dot searching" id="statusDot"></div>
         <span id="statusText">Acquiring GPS...</span>
       </div>
-      <div class="hud-buttons">
-        <button class="gps-btn" onclick="recenterMap()">◎ Recenter</button>
-        <button class="gps-btn" id="navModeBtn" onclick="toggleNavMode()">◎ Heading Up</button>
-      </div>
+      <button class="gps-btn" onclick="recenterMap()">◎ Recenter</button>
     </div>
   </div>
 </div>
@@ -1080,9 +1061,7 @@ let currentPos = null;
 let nearestWpIdx = 0;
 let followCoords = [];
 let currentHeading = null;     // degrees, 0 = north
-let navMode = false;           // heading-up map rotation
 let autoFollow = true;         // auto-center on user
-let compassAvailable = false;
 
 // ═══════════════════════════════════════════
 // SPLASH / MODE SWITCHING
@@ -1330,7 +1309,6 @@ function startGPS() {
 
       updateUserPosition();
       updateHUD();
-      updateMapOrientation();
       updateStatus('tracking', `GPS active · ±${Math.round(currentPos.acc)}m`);
     },
     (err) => {
@@ -1344,29 +1322,22 @@ function startGPS() {
 }
 
 function startCompass() {
-  // iOS 13+ requires permission
+  // iOS 13+ requires permission - request it on first GPS lock
   if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    // We'll request permission when user taps the nav mode button
-    compassAvailable = true;
-    return;
-  }
-
-  // Android and older iOS
-  if ('DeviceOrientationEvent' in window) {
-    window.addEventListener('deviceorientation', handleCompass, true);
-    compassAvailable = true;
-  }
-}
-
-function requestCompassPermission() {
-  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // We'll request on first interaction (startGPS is called after user gesture via splash)
     DeviceOrientationEvent.requestPermission()
       .then(state => {
         if (state === 'granted') {
           window.addEventListener('deviceorientation', handleCompass, true);
         }
       })
-      .catch(console.error);
+      .catch(() => {}); // Silently fail - GPS heading still works when moving
+    return;
+  }
+
+  // Android and older iOS
+  if ('DeviceOrientationEvent' in window) {
+    window.addEventListener('deviceorientation', handleCompass, true);
   }
 }
 
@@ -1378,7 +1349,6 @@ function handleCompass(e) {
     heading = e.webkitCompassHeading;
   }
   // Android: alpha is degrees, but relative to device start orientation
-  // absolute + alpha gives true north on some devices
   else if (e.absolute && e.alpha !== null) {
     heading = (360 - e.alpha) % 360;
   }
@@ -1390,7 +1360,6 @@ function handleCompass(e) {
       if (userMarker) {
         userMarker.setIcon(userIconWithHeading(currentHeading));
       }
-      updateMapOrientation();
     }
   }
 }
@@ -1420,55 +1389,6 @@ function updateUserPosition() {
   }
 }
 
-function updateMapOrientation() {
-  if (!navMode || currentHeading === null) return;
-  const container = map.getContainer();
-  // Scale 1.42 covers corners during any rotation (sqrt(2) ≈ 1.414)
-  container.style.transition = 'transform 0.3s ease';
-  container.style.transform = `rotate(${-currentHeading}deg) scale(1.42)`;
-  container.style.transformOrigin = 'center center';
-  container.classList.add('heading-up');
-
-  // Counter-rotate overlays so HUD stays upright
-  document.querySelectorAll('.overlay-top, .follow-hud, .recenter-btn').forEach(el => {
-    el.style.transition = 'transform 0.3s ease';
-    el.style.transform = `rotate(${currentHeading}deg)`;
-  });
-}
-
-function toggleNavMode() {
-  navMode = !navMode;
-  autoFollow = true;
-
-  const btn = document.getElementById('navModeBtn');
-
-  if (navMode) {
-    btn.innerHTML = '⬆ North Up';
-    btn.style.background = 'rgba(26,191,160,0.15)';
-    btn.style.borderColor = 'rgba(26,191,160,0.4)';
-    btn.style.color = '#1ABFA0';
-
-    // Request compass permission on iOS
-    if (compassAvailable && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      requestCompassPermission();
-    }
-
-    updateMapOrientation();
-  } else {
-    btn.innerHTML = '◎ Heading Up';
-    btn.style.background = '';
-    btn.style.borderColor = '';
-    btn.style.color = '';
-
-    // Reset rotation
-    const container = map.getContainer();
-    container.style.transform = 'none';
-    container.classList.remove('heading-up');
-    document.querySelectorAll('.overlay-top, .follow-hud, .recenter-btn').forEach(el => {
-      el.style.transform = 'none';
-    });
-  }
-}
 
 function updateHUD() {
   if (!currentPos || followCoords.length === 0) return;
@@ -1495,9 +1415,7 @@ function updateHUD() {
 
   // Bearing
   const brng = bearing(currentPos.lat, currentPos.lng, followCoords[nearestIdx][0], followCoords[nearestIdx][1]);
-  // In heading-up mode, show bearing relative to current heading
-  const displayBearing = (navMode && currentHeading !== null) ? ((brng - currentHeading + 360) % 360) : brng;
-  document.getElementById('compassArrow').style.transform = `rotate(${displayBearing}deg)`;
+  document.getElementById('compassArrow').style.transform = `rotate(${brng}deg)`;
   document.getElementById('compassBearing').textContent = `${Math.round(brng)}° ${bearingToCompass(brng)}`;
 
   // Next waypoint number

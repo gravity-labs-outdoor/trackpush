@@ -1036,14 +1036,17 @@ function userIconWithHeading(heading) {
   const opacity = heading !== null ? 1 : 0.5;
   return L.divIcon({
     className: '',
-    html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;">
-      <div style="position:absolute;width:40px;height:40px;background:rgba(26,191,160,0.12);border-radius:50%;"></div>
-      <svg width="28" height="28" viewBox="0 0 28 28" style="transform:rotate(${rotation}deg);transition:transform 0.3s ease;opacity:${opacity};filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
-        <polygon points="14,2 24,22 14,17 4,22" fill="#1ABFA0" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+    html: `<div style="width:48px;height:64px;display:flex;align-items:center;justify-content:center;position:relative;">
+      <div style="position:absolute;width:44px;height:44px;top:14px;background:rgba(26,191,160,0.1);border-radius:50%;"></div>
+      <svg width="48" height="64" viewBox="0 0 48 64" style="transform:rotate(${rotation}deg);transition:transform 0.3s ease;opacity:${opacity};filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
+        <!-- Leading pointer arrow -->
+        <polygon points="24,0 28,14 24,10 20,14" fill="#1ABFA0" opacity="0.7"/>
+        <!-- Main chevron -->
+        <polygon points="24,14 38,42 24,35 10,42" fill="#1ABFA0" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
       </svg>
     </div>`,
-    iconSize: [40, 40],
-    iconAnchor: [20, 20]
+    iconSize: [48, 64],
+    iconAnchor: [24, 36]
   });
 }
 
@@ -1248,6 +1251,58 @@ function copyLink() {
 // ═══════════════════════════════════════════
 // FOLLOW MODE
 // ═══════════════════════════════════════════
+let routeArrows = [];
+
+function addRouteArrows(coords) {
+  // Clear existing arrows
+  routeArrows.forEach(m => map.removeLayer(m));
+  routeArrows = [];
+
+  if (coords.length < 2) return;
+
+  // Calculate total route distance and place arrows at regular intervals
+  const segments = [];
+  let totalDist = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const d = haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]);
+    segments.push({ from: coords[i], to: coords[i+1], dist: d, cumDist: totalDist });
+    totalDist += d;
+  }
+
+  // Place an arrow roughly every 150m, minimum 3 arrows, skip near start/end
+  const arrowCount = Math.max(3, Math.floor(totalDist / 150));
+  const interval = totalDist / (arrowCount + 1);
+
+  for (let n = 1; n <= arrowCount; n++) {
+    const targetDist = n * interval;
+
+    // Find which segment this falls on
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      if (targetDist >= seg.cumDist && targetDist <= seg.cumDist + seg.dist) {
+        // Interpolate position along this segment
+        const ratio = (targetDist - seg.cumDist) / seg.dist;
+        const lat = seg.from[0] + (seg.to[0] - seg.from[0]) * ratio;
+        const lng = seg.from[1] + (seg.to[1] - seg.from[1]) * ratio;
+        const brng = bearing(seg.from[0], seg.from[1], seg.to[0], seg.to[1]);
+
+        const arrowIcon = L.divIcon({
+          className: '',
+          html: `<svg width="16" height="16" viewBox="0 0 16 16" style="transform:rotate(${brng}deg);filter:drop-shadow(0 1px 2px rgba(0,0,0,0.3));">
+            <polygon points="8,1 14,12 8,9 2,12" fill="#E8651A" opacity="0.85"/>
+          </svg>`,
+          iconSize: [16, 16],
+          iconAnchor: [8, 8]
+        });
+
+        const marker = L.marker([lat, lng], { icon: arrowIcon, interactive: false }).addTo(map);
+        routeArrows.push(marker);
+        break;
+      }
+    }
+  }
+}
+
 function drawRoute(coords) {
   wpMarkers.forEach(m => map.removeLayer(m));
   wpMarkers = [];
@@ -1260,6 +1315,9 @@ function drawRoute(coords) {
     opacity: 0.9,
     lineCap: 'round'
   }).addTo(map);
+
+  // Add directional arrows along the route
+  addRouteArrows(coords);
 
   // Add start and end markers
   const startIcon = L.divIcon({

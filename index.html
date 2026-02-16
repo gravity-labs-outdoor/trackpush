@@ -43,6 +43,12 @@
     z-index: 1;
   }
 
+  /* Scale up slightly when rotating to cover corner gaps */
+  #map.heading-up {
+    transform-origin: center center;
+    transition: transform 0.3s ease;
+  }
+
   .leaflet-control-zoom { display: none; }
   .leaflet-control-attribution { font-size: 9px !important; opacity: 0.5; }
 
@@ -596,6 +602,16 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+  }
+
+  .hud-status .gps-btn + .gps-btn {
+    margin-left: 0;
+  }
+
+  .hud-buttons {
+    display: flex;
+    gap: 6px;
   }
 
   .status-indicator {
@@ -908,7 +924,10 @@
         <div class="status-dot searching" id="statusDot"></div>
         <span id="statusText">Acquiring GPS...</span>
       </div>
-      <button class="gps-btn" onclick="recenterMap()">◎ Recenter</button>
+      <div class="hud-buttons">
+        <button class="gps-btn" onclick="recenterMap()">◎ Recenter</button>
+        <button class="gps-btn" id="navModeBtn" onclick="toggleNavMode()">◎ Heading Up</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1031,12 +1050,21 @@ function wpIcon(num, color = '#E8651A') {
   });
 }
 
-const userIcon = L.divIcon({
-  className: '',
-  html: `<div style="width:18px;height:18px;background:#1ABFA0;border-radius:50%;border:3px solid white;box-shadow:0 0 0 4px rgba(26,191,160,0.3), 0 2px 8px rgba(0,0,0,0.4);"></div>`,
-  iconSize: [18, 18],
-  iconAnchor: [9, 9]
-});
+function userIconWithHeading(heading) {
+  const rotation = heading !== null ? heading : 0;
+  const opacity = heading !== null ? 1 : 0.5;
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;">
+      <div style="position:absolute;width:40px;height:40px;background:rgba(26,191,160,0.12);border-radius:50%;"></div>
+      <svg width="28" height="28" viewBox="0 0 28 28" style="transform:rotate(${rotation}deg);transition:transform 0.3s ease;opacity:${opacity};filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4));">
+        <polygon points="14,2 24,22 14,17 4,22" fill="#1ABFA0" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+    </div>`,
+    iconSize: [40, 40],
+    iconAnchor: [20, 20]
+  });
+}
 
 // ═══════════════════════════════════════════
 // STATE
@@ -1051,6 +1079,10 @@ let gpsWatchId = null;
 let currentPos = null;
 let nearestWpIdx = 0;
 let followCoords = [];
+let currentHeading = null;     // degrees, 0 = north
+let navMode = false;           // heading-up map rotation
+let autoFollow = true;         // auto-center on user
+let compassAvailable = false;
 
 // ═══════════════════════════════════════════
 // SPLASH / MODE SWITCHING
@@ -1290,8 +1322,15 @@ function startGPS() {
   gpsWatchId = navigator.geolocation.watchPosition(
     (pos) => {
       currentPos = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+
+      // Use GPS heading when moving (more reliable than compass)
+      if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.speed > 0.5) {
+        currentHeading = pos.coords.heading;
+      }
+
       updateUserPosition();
       updateHUD();
+      updateMapOrientation();
       updateStatus('tracking', `GPS active · ±${Math.round(currentPos.acc)}m`);
     },
     (err) => {
@@ -1299,6 +1338,61 @@ function startGPS() {
     },
     { enableHighAccuracy: true, timeout: 15000, maximumAge: 2000 }
   );
+
+  // Start device compass for heading when stationary
+  startCompass();
+}
+
+function startCompass() {
+  // iOS 13+ requires permission
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // We'll request permission when user taps the nav mode button
+    compassAvailable = true;
+    return;
+  }
+
+  // Android and older iOS
+  if ('DeviceOrientationEvent' in window) {
+    window.addEventListener('deviceorientation', handleCompass, true);
+    compassAvailable = true;
+  }
+}
+
+function requestCompassPermission() {
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission()
+      .then(state => {
+        if (state === 'granted') {
+          window.addEventListener('deviceorientation', handleCompass, true);
+        }
+      })
+      .catch(console.error);
+  }
+}
+
+function handleCompass(e) {
+  let heading = null;
+
+  // iOS: webkitCompassHeading is degrees from north
+  if (e.webkitCompassHeading !== undefined) {
+    heading = e.webkitCompassHeading;
+  }
+  // Android: alpha is degrees, but relative to device start orientation
+  // absolute + alpha gives true north on some devices
+  else if (e.absolute && e.alpha !== null) {
+    heading = (360 - e.alpha) % 360;
+  }
+
+  if (heading !== null) {
+    // Only use compass heading when GPS heading isn't available (stationary)
+    if (currentPos && (!currentPos.speed || currentPos.speed < 0.5)) {
+      currentHeading = heading;
+      if (userMarker) {
+        userMarker.setIcon(userIconWithHeading(currentHeading));
+      }
+      updateMapOrientation();
+    }
+  }
 }
 
 function updateUserPosition() {
@@ -1306,7 +1400,7 @@ function updateUserPosition() {
   const latlng = [currentPos.lat, currentPos.lng];
 
   if (!userMarker) {
-    userMarker = L.marker(latlng, { icon: userIcon, zIndexOffset: 1000 }).addTo(map);
+    userMarker = L.marker(latlng, { icon: userIconWithHeading(currentHeading), zIndexOffset: 1000 }).addTo(map);
     userAccuracyCircle = L.circle(latlng, {
       radius: currentPos.acc,
       fillColor: '#1ABFA0',
@@ -1315,10 +1409,64 @@ function updateUserPosition() {
       weight: 1,
       opacity: 0.3
     }).addTo(map);
+    // Initial center on user
+    if (autoFollow) map.setView(latlng, 16);
   } else {
     userMarker.setLatLng(latlng);
+    userMarker.setIcon(userIconWithHeading(currentHeading));
     userAccuracyCircle.setLatLng(latlng);
     userAccuracyCircle.setRadius(currentPos.acc);
+    if (autoFollow) map.setView(latlng, map.getZoom());
+  }
+}
+
+function updateMapOrientation() {
+  if (!navMode || currentHeading === null) return;
+  const container = map.getContainer();
+  // Scale 1.42 covers corners during any rotation (sqrt(2) ≈ 1.414)
+  container.style.transition = 'transform 0.3s ease';
+  container.style.transform = `rotate(${-currentHeading}deg) scale(1.42)`;
+  container.style.transformOrigin = 'center center';
+  container.classList.add('heading-up');
+
+  // Counter-rotate overlays so HUD stays upright
+  document.querySelectorAll('.overlay-top, .follow-hud, .recenter-btn').forEach(el => {
+    el.style.transition = 'transform 0.3s ease';
+    el.style.transform = `rotate(${currentHeading}deg)`;
+  });
+}
+
+function toggleNavMode() {
+  navMode = !navMode;
+  autoFollow = true;
+
+  const btn = document.getElementById('navModeBtn');
+
+  if (navMode) {
+    btn.innerHTML = '⬆ North Up';
+    btn.style.background = 'rgba(26,191,160,0.15)';
+    btn.style.borderColor = 'rgba(26,191,160,0.4)';
+    btn.style.color = '#1ABFA0';
+
+    // Request compass permission on iOS
+    if (compassAvailable && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      requestCompassPermission();
+    }
+
+    updateMapOrientation();
+  } else {
+    btn.innerHTML = '◎ Heading Up';
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+
+    // Reset rotation
+    const container = map.getContainer();
+    container.style.transform = 'none';
+    container.classList.remove('heading-up');
+    document.querySelectorAll('.overlay-top, .follow-hud, .recenter-btn').forEach(el => {
+      el.style.transform = 'none';
+    });
   }
 }
 
@@ -1347,7 +1495,9 @@ function updateHUD() {
 
   // Bearing
   const brng = bearing(currentPos.lat, currentPos.lng, followCoords[nearestIdx][0], followCoords[nearestIdx][1]);
-  document.getElementById('compassArrow').style.transform = `rotate(${brng}deg)`;
+  // In heading-up mode, show bearing relative to current heading
+  const displayBearing = (navMode && currentHeading !== null) ? ((brng - currentHeading + 360) % 360) : brng;
+  document.getElementById('compassArrow').style.transform = `rotate(${displayBearing}deg)`;
   document.getElementById('compassBearing').textContent = `${Math.round(brng)}° ${bearingToCompass(brng)}`;
 
   // Next waypoint number
@@ -1368,12 +1518,16 @@ function updateStatus(type, text) {
 }
 
 function recenterMap() {
+  autoFollow = true;
   if (currentPos) {
-    map.setView([currentPos.lat, currentPos.lng], 15);
+    map.setView([currentPos.lat, currentPos.lng], 16);
   } else if (followCoords.length > 0) {
     map.fitBounds(L.latLngBounds(followCoords).pad(0.15));
   }
 }
+
+// Stop auto-follow when user manually pans
+map.on('dragstart', () => { autoFollow = false; });
 
 // ═══════════════════════════════════════════
 // ERROR HANDLING

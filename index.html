@@ -1380,21 +1380,22 @@ function startGPS() {
 }
 
 function startCompass() {
-  // iOS 13+ requires permission - request it on first GPS lock
+  // iOS 13+ requires permission
   if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    // We'll request on first interaction (startGPS is called after user gesture via splash)
     DeviceOrientationEvent.requestPermission()
       .then(state => {
         if (state === 'granted') {
           window.addEventListener('deviceorientation', handleCompass, true);
         }
       })
-      .catch(() => {}); // Silently fail - GPS heading still works when moving
+      .catch(() => {});
     return;
   }
 
-  // Android and older iOS
-  if ('DeviceOrientationEvent' in window) {
+  // Android: prefer deviceorientationabsolute (true north guaranteed)
+  if ('ondeviceorientationabsolute' in window) {
+    window.addEventListener('deviceorientationabsolute', handleCompass, true);
+  } else if ('DeviceOrientationEvent' in window) {
     window.addEventListener('deviceorientation', handleCompass, true);
   }
 }
@@ -1402,12 +1403,12 @@ function startCompass() {
 function handleCompass(e) {
   let heading = null;
 
-  // iOS: webkitCompassHeading is degrees from north
+  // iOS: webkitCompassHeading is degrees from true north
   if (e.webkitCompassHeading !== undefined) {
     heading = e.webkitCompassHeading;
   }
-  // Android: alpha is degrees, but relative to device start orientation
-  else if (e.absolute && e.alpha !== null) {
+  // Android (deviceorientationabsolute or absolute:true): alpha from true north
+  else if (e.alpha !== null && (e.absolute === true || e.type === 'deviceorientationabsolute')) {
     heading = (360 - e.alpha) % 360;
   }
 
